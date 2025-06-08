@@ -10,6 +10,10 @@
         android:name="android.hardware.camera.autofocus"
         android:required="false" />
 
+    <!-- Optional: Add this for better camera access -->
+    <uses-feature
+        android:name="android.hardware.camera.front"
+        android:required="false" />
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

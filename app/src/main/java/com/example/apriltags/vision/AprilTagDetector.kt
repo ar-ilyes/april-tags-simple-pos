@@ -1,256 +1,319 @@
 package com.example.apriltags.vision
 
-import com.example.apriltags.data.DetectedTag
-import com.example.apriltags.data.Point2D
+import android.util.Log
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
-import org.opencv.objdetect.QRCodeDetector
-import kotlin.math.*
+import org.opencv.objdetect.ArucoDetector
+import org.opencv.objdetect.DetectorParameters
+import org.opencv.objdetect.Dictionary
+import org.opencv.objdetect.Objdetect
+import com.example.apriltags.data.DetectedTag
+import com.example.apriltags.data.Point2D
 
-class AprilTagDetector {
+class ModernArucoDetector {
+
+    companion object {
+        private const val TAG = "ModernArucoDetector"
+    }
+
+    private val dictionary: Dictionary
+    private val detectorParams: DetectorParameters
+    private val arucoDetector: ArucoDetector
+
+    init {
+        try {
+            // Create dictionary - DICT_6X6_250 is similar to AprilTag and very reliable
+            dictionary = Objdetect.getPredefinedDictionary(Objdetect.DICT_6X6_250)
+
+            // Create and configure detector parameters for optimal mobile performance
+            detectorParams = DetectorParameters().apply {
+                // Adaptive thresholding parameters
+                set_adaptiveThreshWinSizeMin(3)
+                set_adaptiveThreshWinSizeMax(23)
+                set_adaptiveThreshWinSizeStep(10)
+                set_adaptiveThreshConstant(7.0)
+
+                // Corner refinement for sub-pixel accuracy
+                set_cornerRefinementMethod(Objdetect.CORNER_REFINE_SUBPIX)
+                set_cornerRefinementWinSize(5)
+                set_cornerRefinementMaxIterations(30)
+                set_cornerRefinementMinAccuracy(0.1)
+
+                // Contour filtering parameters
+                set_minMarkerPerimeterRate(0.03)
+                set_maxMarkerPerimeterRate(4.0)
+                set_polygonalApproxAccuracyRate(0.03)
+                set_minCornerDistanceRate(0.05)
+                set_minDistanceToBorder(3)
+
+                // Perspective removal parameters
+                set_markerBorderBits(1)
+                set_perspectiveRemovePixelPerCell(4)
+                set_perspectiveRemoveIgnoredMarginPerCell(0.13)
+
+                // Error correction parameters
+                set_maxErroneousBitsInBorderRate(0.35)
+                set_errorCorrectionRate(0.6)
+
+                // Detection reliability
+                set_detectInvertedMarker(false) // Set true if you have inverted markers
+            }
+
+            // Create the ArUco detector with our parameters
+            arucoDetector = ArucoDetector(dictionary, detectorParams)
+
+            Log.d(TAG, "Modern ArUco detector initialized successfully")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize ArUco detector", e)
+            throw e
+        }
+    }
 
     fun detectTags(inputMat: Mat): List<DetectedTag> {
-        android.util.Log.d("AprilTagDetector", "detectTags called - input: ${inputMat.width()}x${inputMat.height()}")
+        Log.d(TAG, "Starting ArUco detection on ${inputMat.width()}x${inputMat.height()} image")
 
         if (inputMat.empty()) {
-            android.util.Log.e("AprilTagDetector", "Input Mat is empty!")
+            Log.e(TAG, "Input Mat is empty!")
             return emptyList()
         }
 
-        val grayMat = Mat()
         val detectedTags = mutableListOf<DetectedTag>()
+        val grayMat = Mat()
 
         try {
-            // Convert to grayscale
+            // Step 1: Preprocess image for optimal detection
+            preprocessImage(inputMat, grayMat)
+
+            if (grayMat.empty()) {
+                Log.e(TAG, "Preprocessed image is empty!")
+                return emptyList()
+            }
+
+            // Step 2: Detect ArUco markers
+            val corners = mutableListOf<Mat>()
+            val ids = Mat()
+            val rejectedCandidates = mutableListOf<Mat>()
+
+            arucoDetector.detectMarkers(grayMat, corners, ids, rejectedCandidates)
+
+            Log.d(TAG, "ArUco detection found ${corners.size} markers")
+
+            // Step 3: Process detected markers
+            if (corners.isNotEmpty() && !ids.empty()) {
+                processDetectedMarkers(corners, ids, detectedTags)
+            }
+
+            // Step 4: Cleanup
+            ids.release()
+            corners.forEach { it.release() }
+            rejectedCandidates.forEach { it.release() }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during ArUco detection", e)
+            e.printStackTrace()
+        } finally {
+            grayMat.release()
+        }
+
+        Log.d(TAG, "Detection complete. Found ${detectedTags.size} valid ArUco markers")
+        return detectedTags
+    }
+
+    private fun preprocessImage(inputMat: Mat, grayMat: Mat) {
+        try {
+            // Convert to grayscale if needed
             if (inputMat.channels() > 1) {
                 Imgproc.cvtColor(inputMat, grayMat, Imgproc.COLOR_RGB2GRAY)
             } else {
                 inputMat.copyTo(grayMat)
             }
 
-            if (grayMat.empty()) {
-                return emptyList()
-            }
+            // Apply histogram equalization for better contrast
+            val equalizedMat = Mat()
+            Imgproc.equalizeHist(grayMat, equalizedMat)
 
-            // Detect AprilTag-like square patterns
-            detectAprilTagPatterns(grayMat, detectedTags)
+            // Blend original and equalized (70% original, 30% equalized)
+            Core.addWeighted(grayMat, 0.7, equalizedMat, 0.3, 0.0, grayMat)
+
+            // Optional: Apply slight Gaussian blur to reduce noise
+            val blurredMat = Mat()
+            Imgproc.GaussianBlur(grayMat, blurredMat, Size(3.0, 3.0), 0.0)
+            blurredMat.copyTo(grayMat)
+
+            // Cleanup
+            equalizedMat.release()
+            blurredMat.release()
 
         } catch (e: Exception) {
-            android.util.Log.e("AprilTagDetector", "Error in detectTags", e)
-            e.printStackTrace()
-        } finally {
-            grayMat.release()
+            Log.w(TAG, "Image preprocessing failed, using original", e)
+            if (inputMat.channels() > 1) {
+                Imgproc.cvtColor(inputMat, grayMat, Imgproc.COLOR_RGB2GRAY)
+            } else {
+                inputMat.copyTo(grayMat)
+            }
         }
-
-        android.util.Log.d("AprilTagDetector", "Returning ${detectedTags.size} detected tags")
-        return detectedTags
     }
 
-    private fun detectAprilTagPatterns(grayMat: Mat, detectedTags: MutableList<DetectedTag>) {
+    private fun processDetectedMarkers(
+        corners: List<Mat>,
+        ids: Mat,
+        detectedTags: MutableList<DetectedTag>
+    ) {
         try {
-            // Step 1: Adaptive thresholding for better edge detection
-            val threshMat = Mat()
-            Imgproc.adaptiveThreshold(
-                grayMat, threshMat, 255.0,
-                Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
-                Imgproc.THRESH_BINARY, 21, 5.0
-            )
+            // Extract marker IDs
+            val idsArray = IntArray(ids.rows())
+            ids.get(0, 0, idsArray)
 
-            // Step 2: Find contours - FIXED TYPES
-            val contours = mutableListOf<MatOfPoint>()
-            val hierarchy = Mat()
-            Imgproc.findContours(
-                threshMat, contours, hierarchy,
-                Imgproc.RETR_TREE, Imgproc.CHAIN_APPROX_SIMPLE
-            )
+            for (i in corners.indices) {
+                try {
+                    val markerId = idsArray[i]
+                    val cornerMat = corners[i]
 
-            android.util.Log.d("AprilTagDetector", "Found ${contours.size} contours")
+                    // Extract corner points from the Mat
+                    val cornerPoints = extractCornerPoints(cornerMat)
 
-            // Step 3: Filter and analyze contours
-            for (i in contours.indices) {
-                val contour = contours[i]
-                val area = Imgproc.contourArea(contour)
+                    if (cornerPoints.size == 4) {
+                        // Validate marker quality
+                        if (isMarkerValid(cornerPoints)) {
+                            val center = calculateCenter(cornerPoints)
 
-                // Filter by area (adjust based on expected tag size)
-                if (area > 2000 && area < 100000) {
-
-                    // Step 4: Approximate contour to polygon - FIXED
-                    val approx = MatOfPoint2f()
-                    val contour2f = MatOfPoint2f()
-                    contour.convertTo(contour2f, CvType.CV_32FC2)
-
-                    val epsilon = 0.02 * Imgproc.arcLength(contour2f, true)
-                    Imgproc.approxPolyDP(contour2f, approx, epsilon, true)
-
-                    // Step 5: Check if it's a quadrilateral
-                    val points = approx.toArray()
-                    if (points.size == 4) {
-
-                        if (isValidAprilTagShape(points, area)) {
-                            val corners = points.map { Point2D(it.x.toFloat(), it.y.toFloat()) }
-                            val center = Point2D(
-                                corners.map { it.x }.average().toFloat(),
-                                corners.map { it.y }.average().toFloat()
+                            val detectedTag = DetectedTag(
+                                id = markerId,
+                                corners = cornerPoints,
+                                center = center
                             )
 
-                            // Step 6: Extract and decode the tag ID
-                            val tagId = extractTagId(grayMat, corners)
-
-                            if (tagId != -1) {
-                                detectedTags.add(DetectedTag(tagId, corners, center))
-                                android.util.Log.d("AprilTagDetector", "Detected AprilTag ID: $tagId at center: $center")
-                            }
+                            detectedTags.add(detectedTag)
+                            Log.d(TAG, "Detected ArUco marker ID: $markerId at center: $center")
+                        } else {
+                            Log.d(TAG, "Marker $markerId failed validation")
                         }
                     }
 
-                    // Cleanup
-                    approx.release()
-                    contour2f.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error processing marker $i", e)
                 }
             }
 
-            // Cleanup
-            threshMat.release()
-            hierarchy.release()
-            contours.forEach { it.release() }
-
         } catch (e: Exception) {
-            android.util.Log.e("AprilTagDetector", "Error in detectAprilTagPatterns", e)
-            e.printStackTrace()
+            Log.e(TAG, "Error processing detected markers", e)
         }
     }
 
-    private fun isValidAprilTagShape(points: Array<org.opencv.core.Point>, area: Double): Boolean {
-        if (points.size != 4) return false
+    private fun extractCornerPoints(cornerMat: Mat): List<Point2D> {
+        val corners = mutableListOf<Point2D>()
 
-        // Check if quadrilateral is roughly square
-        val corners = points.toList()
-
-        // Calculate side lengths
-        val side1 = distance(corners[0], corners[1])
-        val side2 = distance(corners[1], corners[2])
-        val side3 = distance(corners[2], corners[3])
-        val side4 = distance(corners[3], corners[0])
-
-        val avgSide = (side1 + side2 + side3 + side4) / 4.0
-        val maxDeviation = avgSide * 0.3 // Allow 30% deviation
-
-        // Check if all sides are roughly equal (square-like)
-        val isSquareLike = listOf(side1, side2, side3, side4).all {
-            kotlin.math.abs(it - avgSide) < maxDeviation
-        }
-
-        // Check if area matches expected square area
-        val expectedArea = avgSide * avgSide
-        val areaRatio = area / expectedArea
-        val isValidArea = areaRatio > 0.7 && areaRatio < 1.3
-
-        return isSquareLike && isValidArea
-    }
-
-    private fun distance(p1: org.opencv.core.Point, p2: org.opencv.core.Point): Double {
-        val dx = p1.x - p2.x
-        val dy = p1.y - p2.y
-        return kotlin.math.sqrt(dx * dx + dy * dy)
-    }
-
-    private fun extractTagId(grayMat: Mat, corners: List<Point2D>): Int {
         try {
-            // Step 1: Extract the tag region using perspective transform
-            val tagSize = 200 // Target size for analysis
+            // ArUco corners are stored as 1x4x2 Mat (1 marker, 4 corners, x,y coordinates)
+            if (cornerMat.rows() == 1 && cornerMat.cols() == 4 && cornerMat.channels() == 2) {
+                val data = FloatArray(8) // 4 corners * 2 coordinates
+                cornerMat.get(0, 0, data)
 
-            // Source points (tag corners) - FIXED
-            val srcPoints = MatOfPoint2f()
-            val srcArray = arrayOf(
-                org.opencv.core.Point(corners[0].x.toDouble(), corners[0].y.toDouble()),
-                org.opencv.core.Point(corners[1].x.toDouble(), corners[1].y.toDouble()),
-                org.opencv.core.Point(corners[2].x.toDouble(), corners[2].y.toDouble()),
-                org.opencv.core.Point(corners[3].x.toDouble(), corners[3].y.toDouble())
-            )
-            srcPoints.fromArray(*srcArray)
-
-            // Destination points (normalized square) - FIXED
-            val dstPoints = MatOfPoint2f()
-            val dstArray = arrayOf(
-                org.opencv.core.Point(0.0, 0.0),
-                org.opencv.core.Point(tagSize.toDouble(), 0.0),
-                org.opencv.core.Point(tagSize.toDouble(), tagSize.toDouble()),
-                org.opencv.core.Point(0.0, tagSize.toDouble())
-            )
-            dstPoints.fromArray(*dstArray)
-
-            // Get perspective transform
-            val transform = Imgproc.getPerspectiveTransform(srcPoints, dstPoints)
-
-            // Apply transform to get normalized tag image
-            val normalizedTag = Mat()
-            Imgproc.warpPerspective(grayMat, normalizedTag, transform, Size(tagSize.toDouble(), tagSize.toDouble()))
-
-            // Step 2: Analyze the normalized tag pattern
-            val tagId = analyzeTagPattern(normalizedTag)
-
-            // Cleanup
-            srcPoints.release()
-            dstPoints.release()
-            transform.release()
-            normalizedTag.release()
-
-            return tagId
+                for (i in 0 until 4) {
+                    val x = data[i * 2]
+                    val y = data[i * 2 + 1]
+                    corners.add(Point2D(x, y))
+                }
+            } else {
+                Log.w(TAG, "Unexpected corner matrix format: ${cornerMat.rows()}x${cornerMat.cols()}x${cornerMat.channels()}")
+            }
 
         } catch (e: Exception) {
-            android.util.Log.e("AprilTagDetector", "Error extracting tag ID", e)
-            return -1
+            Log.e(TAG, "Error extracting corner points", e)
         }
+
+        return corners
     }
 
-    private fun analyzeTagPattern(normalizedTag: Mat): Int {
+    private fun isMarkerValid(corners: List<Point2D>): Boolean {
+        if (corners.size != 4) return false
+
         try {
-            // Threshold the normalized tag
-            val binaryTag = Mat()
-            Imgproc.threshold(normalizedTag, binaryTag, 127.0, 255.0, Imgproc.THRESH_BINARY)
+            // Check 1: Minimum size
+            val minX = corners.minOf { it.x }
+            val maxX = corners.maxOf { it.x }
+            val minY = corners.minOf { it.y }
+            val maxY = corners.maxOf { it.y }
 
-            val tagSize = normalizedTag.width().toInt()
-            val cellSize = tagSize / 8 // Assuming 8x8 grid like AprilTag
+            val width = maxX - minX
+            val height = maxY - minY
+            val area = width * height
 
-            // Sample the inner 6x6 grid (ignoring border)
-            val pattern = Array(6) { BooleanArray(6) }
-
-            for (row in 0 until 6) {
-                for (col in 0 until 6) {
-                    val x = (col + 1) * cellSize + cellSize / 2
-                    val y = (row + 1) * cellSize + cellSize / 2
-
-                    val pixel = binaryTag.get(y, x)[0]
-                    pattern[row][col] = pixel > 127.0 // White = true, Black = false
-                }
+            if (area < 400) { // Minimum 20x20 pixels
+                Log.d(TAG, "Marker too small: area=$area")
+                return false
             }
 
-            binaryTag.release()
+            // Check 2: Aspect ratio (should be roughly square)
+            val aspectRatio = width / height
+            if (aspectRatio < 0.5 || aspectRatio > 2.0) {
+                Log.d(TAG, "Invalid aspect ratio: $aspectRatio")
+                return false
+            }
 
-            // Step 3: Decode pattern to ID
-            return decodeAprilTagPattern(pattern)
+            // Check 3: Convexity
+            if (!isConvexQuadrilateral(corners)) {
+                Log.d(TAG, "Marker is not convex")
+                return false
+            }
+
+            return true
 
         } catch (e: Exception) {
-            android.util.Log.e("AprilTagDetector", "Error analyzing tag pattern", e)
-            return -1
+            Log.w(TAG, "Error validating marker", e)
+            return false
         }
     }
 
-    private fun decodeAprilTagPattern(pattern: Array<BooleanArray>): Int {
-        // Simple pattern matching for IDs 0-15
-        // In real AprilTags, this involves complex error correction
+    private fun isConvexQuadrilateral(corners: List<Point2D>): Boolean {
+        // Check if all cross products have the same sign (indicating convexity)
+        var previousSign = 0
 
-        // For now, use a simple checksum-based approach
-        var checksum = 0
-        for (row in 1 until 5) { // Use inner 4x4 area
-            for (col in 1 until 5) {
-                if (pattern[row][col]) {
-                    checksum += (1 shl (row * 4 + col))
-                }
+        for (i in corners.indices) {
+            val p1 = corners[i]
+            val p2 = corners[(i + 1) % 4]
+            val p3 = corners[(i + 2) % 4]
+
+            val cross = crossProduct(p1, p2, p3)
+            val currentSign = when {
+                cross > 0 -> 1
+                cross < 0 -> -1
+                else -> 0
+            }
+
+            if (previousSign == 0) {
+                previousSign = currentSign
+            } else if (currentSign != 0 && currentSign != previousSign) {
+                return false // Signs differ, not convex
             }
         }
 
-        // Map checksum to IDs 0-15
-        return (checksum and 0xF)
+        return true
+    }
+
+    private fun crossProduct(p1: Point2D, p2: Point2D, p3: Point2D): Float {
+        val v1x = p2.x - p1.x
+        val v1y = p2.y - p1.y
+        val v2x = p3.x - p2.x
+        val v2y = p3.y - p2.y
+        return v1x * v2y - v1y * v2x
+    }
+
+    private fun calculateCenter(corners: List<Point2D>): Point2D {
+        val centerX = corners.map { it.x }.average().toFloat()
+        val centerY = corners.map { it.y }.average().toFloat()
+        return Point2D(centerX, centerY)
+    }
+
+    fun release() {
+        // Cleanup resources if needed
+        try {
+            // Note: Dictionary and DetectorParameters in modern OpenCV don't have release() methods
+            // They are managed automatically by the JVM garbage collector
+            Log.d(TAG, "ArUco detector resources cleaned up")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error during cleanup", e)
+        }
     }
 }
